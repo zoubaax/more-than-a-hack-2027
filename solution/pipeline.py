@@ -57,24 +57,23 @@ from games import GAME, GAMES, half_video_blocks, require, source_frames  # noqa
 # ---------------------------------------------------------------------------
 
 # Dead-ball detection
-SPEED_DEAD_THRESHOLD = 1.1    # m/s  — smoothed collective player speed below this → dead ball
-SPEED_WINDOW         = 20     # frames — smoothing half-width (0.8 s at 25 fps)
+SPEED_DEAD_THRESHOLD = 1.05   # m/s  — smoothed collective player speed below this → dead ball
+SPEED_WINDOW         = 25     # frames — smoothing half-width (1.0 s at 25 fps)
 BOUNDARY_MARGIN_M    = 1.0    # m  — ball must be this far outside the pitch to flag as out
 
 # Restart dead-ball window (Smart Tagging set pieces)
 TAG_MARGIN_BEFORE    = 50     # frames — mark dead this many frames BEFORE the restart kick
-TAG_SEED_AFTER       = 37     # frames — seed the restarting team for this many frames AFTER kick
+TAG_SEED_AFTER       = 0      # frames — optional seed window after kick (0 = off)
 
 # Possession state machine
-CONTROL_RADIUS_M     = 4.0    # m  — nearest player must be closer than this to claim possession
-N_CTRL_FRAMES        = 5      # frames — consecutive opponent-nearest frames to flip possession
+N_CTRL_FRAMES        = 8      # frames — consecutive opponent-nearest frames to flip possession
 
 # Post-processing
-MIN_SPELL_FRAMES     = 62     # frames — spells shorter than this are merged (~2.5 s at 25 fps)
+MIN_SPELL_FRAMES     = 50     # frames — spells shorter than this are merged (2.0 s at 25 fps)
 
 # Output
 RESULTS_DIR     = os.path.join(ROOT, "evaluation", "results")
-SUBMISSION_NAME = "solution_v3"
+SUBMISSION_NAME = "solution_v4"
 
 # ---------------------------------------------------------------------------
 # Derived constants — read from games.py, not hardcoded
@@ -195,10 +194,10 @@ def read_atd(raw_path, team_of_track, n_frames):
                 c2  = grp.index(",", c1 + 1)
                 px  = float(grp[:c1])      * PITCH_LENGTH
                 py  = float(grp[c1+1:c2])  * PITCH_WIDTH
-                spd = float(grp[c2+1:])    # m/s, already in real units
-
-                n_players[idx] += 1
-                tot_speed[idx] += spd
+                spd_str = grp[c2+1:]
+                if spd_str[0] != MISSING:
+                    tot_speed[idx] += float(spd_str)
+                    n_players[idx] += 1
 
                 if has_ball and slot < len(team_of_track):
                     sq = (px - bx) ** 2 + (py - by) ** 2
@@ -375,14 +374,13 @@ def possession_state_machine(nearest, near_dist, dead_mask, restart_team,
 
         # -- active play --
         near = int(nearest[f])
-        dist = float(near_dist[f]) if not np.isnan(near_dist[f]) else np.inf
 
-        if near == NOBODY or dist > CONTROL_RADIUS_M:
-            # Ball invisible or contested (airborne, crowded) — hold state
+        if near == NOBODY:
+            # Ball invisible: hold current state (pass, airborne, occlusion)
             streak    = 0
             labels[f] = label_of.get(state, "D")
         else:
-            # Clear contact candidate
+            # Ball visible: nearest player contact candidate
             if state == NOBODY:
                 # First possession after dead ball
                 state  = near
