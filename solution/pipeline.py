@@ -75,16 +75,6 @@ MIN_SPELL_FRAMES     = 50     # frames — spells shorter than this are merged (
 RESULTS_DIR     = os.path.join(ROOT, "evaluation", "results")
 SUBMISSION_NAME = "solution_v4"
 
-# ---------------------------------------------------------------------------
-# Derived constants — read from games.py, not hardcoded
-# ---------------------------------------------------------------------------
-
-PITCH_LENGTH, PITCH_WIDTH = GAMES[GAME]["pitch"]   # metres
-FPS                       = GAMES[GAME]["fps"]
-N_FRAMES                  = source_frames("tactical", GAME)
-# [(half_number, first_video_frame, last_video_frame), ...]
-HALF_BLOCKS               = [(f, l) for _, f, l in half_video_blocks(GAME)]
-
 # Internal team codes — ordinal, assigned at load time from the ATD metadata.
 # 0 = home (first team in the XML), 1 = away, -1 = unknown / no ball.
 HOME, AWAY, NOBODY = 0, 1, -1
@@ -143,7 +133,7 @@ def load_team_metadata(meta_path):
 # Step 2 — Stream the ATD raw file
 # ---------------------------------------------------------------------------
 
-def read_atd(raw_path, team_of_track, n_frames):
+def read_atd(raw_path, team_of_track, n_frames, pitch):
     """
     Single-pass stream of the raw ATD text file.
 
@@ -154,6 +144,7 @@ def read_atd(raw_path, team_of_track, n_frames):
         near_dist  float32  metres to nearest player (NaN where no ball)
         mean_speed float32  mean speed of all visible players in m/s
     """
+    length, width = pitch
     ball_x    = np.full(n_frames, np.nan, dtype=np.float32)
     ball_y    = np.full(n_frames, np.nan, dtype=np.float32)
     nearest   = np.full(n_frames, NOBODY, dtype=np.int8)
@@ -179,8 +170,8 @@ def read_atd(raw_path, team_of_track, n_frames):
             if has_ball:
                 c1 = ball_str.index(",")
                 c2 = ball_str.index(",", c1 + 1)
-                bx = float(ball_str[:c1])     * PITCH_LENGTH
-                by = float(ball_str[c1+1:c2]) * PITCH_WIDTH
+                bx = float(ball_str[:c1])     * length
+                by = float(ball_str[c1+1:c2]) * width
                 ball_x[idx] = bx
                 ball_y[idx] = by
 
@@ -192,8 +183,8 @@ def read_atd(raw_path, team_of_track, n_frames):
                     continue
                 c1  = grp.index(",")
                 c2  = grp.index(",", c1 + 1)
-                px  = float(grp[:c1])      * PITCH_LENGTH
-                py  = float(grp[c1+1:c2])  * PITCH_WIDTH
+                px  = float(grp[:c1])      * length
+                py  = float(grp[c1+1:c2])  * width
                 spd_str = grp[c2+1:]
                 if spd_str[0] != MISSING:
                     tot_speed[idx] += float(spd_str)
@@ -224,7 +215,7 @@ def read_atd(raw_path, team_of_track, n_frames):
 SET_PIECE_CODES = {"set pieces", "dead ball"}
 
 
-def load_smart_tagging(xml_path, n_frames, tag_name_map):
+def load_smart_tagging(xml_path, n_frames, tag_name_map, fps=25):
     """
     Parse the Smart Tagging XML and return:
         dead_from_tags (n_frames,) bool   — frames marked dead BEFORE each restart
@@ -242,7 +233,6 @@ def load_smart_tagging(xml_path, n_frames, tag_name_map):
     restart_team = np.full(n_frames, NOBODY, dtype=np.int8)
 
     root = ET.parse(xml_path).getroot()
-    fps  = GAMES[GAME]["fps"]
 
     for inst in root.iter("instance"):
         code  = (inst.findtext("code") or "").strip().lower()
@@ -295,18 +285,19 @@ def speed_dead_mask(mean_speed, n_frames):
     return smoothed < SPEED_DEAD_THRESHOLD
 
 
-def boundary_dead_mask(ball_x, ball_y):
+def boundary_dead_mask(ball_x, ball_y, pitch):
     """Ball tracked but outside the pitch boundary → dead ball."""
+    length, width = pitch
     has_ball = ~np.isnan(ball_x)
-    out_x    = (ball_x < -BOUNDARY_MARGIN_M) | (ball_x > PITCH_LENGTH + BOUNDARY_MARGIN_M)
-    out_y    = (ball_y < -BOUNDARY_MARGIN_M) | (ball_y > PITCH_WIDTH  + BOUNDARY_MARGIN_M)
+    out_x    = (ball_x < -BOUNDARY_MARGIN_M) | (ball_x > length + BOUNDARY_MARGIN_M)
+    out_y    = (ball_y < -BOUNDARY_MARGIN_M) | (ball_y > width + BOUNDARY_MARGIN_M)
     return has_ball & (out_x | out_y)
 
 
-def combined_dead_mask(ball_x, ball_y, mean_speed, tag_dead, n_frames):
+def combined_dead_mask(ball_x, ball_y, mean_speed, tag_dead, n_frames, pitch):
     """Union of all three dead-ball signals."""
     spd_dead = speed_dead_mask(mean_speed, n_frames)
-    bnd_dead = boundary_dead_mask(ball_x, ball_y)
+    bnd_dead = boundary_dead_mask(ball_x, ball_y, pitch)
     return tag_dead | bnd_dead | spd_dead
 
 
@@ -315,7 +306,7 @@ def combined_dead_mask(ball_x, ball_y, mean_speed, tag_dead, n_frames):
 # ---------------------------------------------------------------------------
 
 def possession_state_machine(nearest, near_dist, dead_mask, restart_team,
-                              n_frames, team_names):
+                              n_frames, team_names, half_blocks):
     """
     Per-frame label assignment.
 
@@ -329,9 +320,8 @@ def possession_state_machine(nearest, near_dist, dead_mask, restart_team,
       1. Outside a graded half     → "X"
       2. dead_mask is True         → "D", reset state
       3. restart_team seed active  → seed team wins, no streak needed
-      4. Ball not visible OR nearest player beyond CONTROL_RADIUS_M
-                                   → hold current state (occlusion / aerial)
-      5. Nearest player close enough:
+      4. Ball not visible          → hold current state (occlusion / aerial)
+      5. Nearest player:
            same team as current state → reset opponent streak
            opponent team              → increment streak; flip after N_CTRL_FRAMES
     """
@@ -342,7 +332,7 @@ def possession_state_machine(nearest, near_dist, dead_mask, restart_team,
 
     # Build a boolean mask: True where frame is inside a graded half
     in_half = np.zeros(n_frames, dtype=bool)
-    for first, last in HALF_BLOCKS:
+    for first, last in half_blocks:
         in_half[first:last + 1] = True
 
     state  = NOBODY
@@ -402,14 +392,14 @@ def possession_state_machine(nearest, near_dist, dead_mask, restart_team,
 # Step 6 — Minimum spell-length enforcement
 # ---------------------------------------------------------------------------
 
-def enforce_min_spell(labels, n_frames, min_frames=MIN_SPELL_FRAMES):
+def enforce_min_spell(labels, n_frames, half_blocks, min_frames=MIN_SPELL_FRAMES):
     """
     Absorb spells shorter than min_frames into their predecessor.
     Operates within each half independently so halftime is never bridged.
     """
     out = labels.copy()
 
-    for first, last in HALF_BLOCKS:
+    for first, last in half_blocks:
         window  = out[first:last + 1]
         L       = len(window)
         changed = True
@@ -461,9 +451,11 @@ def main():
     parser.add_argument("--name", default=SUBMISSION_NAME, help="CSV filename stem")
     args = parser.parse_args()
 
-    # Resolve n_frames and half blocks dynamically from games.py
+    # Resolve n_frames, half blocks, pitch, and fps dynamically from games.py
     n_frames   = source_frames("tactical", args.game)
     half_blks  = [(f, l) for _, f, l in half_video_blocks(args.game)]
+    pitch      = GAMES[args.game]["pitch"]
+    fps        = GAMES[args.game]["fps"]
 
     print("=== More Than A Hack 2027 — Possession Pipeline ===")
     print("game: {}   frames: {}   halves: {}".format(
@@ -488,7 +480,7 @@ def main():
     # -- Step 2: tracking data --
     print("\nStreaming {} ATD frames …".format(n_frames))
     ball_x, ball_y, nearest, near_dist, mean_speed = read_atd(
-        raw_path, team_of_track, n_frames)
+        raw_path, team_of_track, n_frames, pitch)
     ball_vis = int(np.sum(~np.isnan(ball_x)))
     print("  Ball visible: {} / {} frames ({:.1f}%)".format(
         ball_vis, n_frames, 100.0 * ball_vis / n_frames))
@@ -497,31 +489,31 @@ def main():
 
     # -- Step 3: Smart Tagging --
     print("\nLoading Smart Tagging …")
-    tag_dead, restart_team = load_smart_tagging(xml_path, n_frames, tag_name_map)
+    tag_dead, restart_team = load_smart_tagging(xml_path, n_frames, tag_name_map, fps)
     n_seeds = int((restart_team != NOBODY).sum())
     print("  Dead-from-tags: {} frames | Restart-seed frames: {}".format(
         int(tag_dead.sum()), n_seeds))
 
     # -- Step 4: combined dead-ball mask --
     print("\nBuilding dead-ball mask …")
-    dead_mask = combined_dead_mask(ball_x, ball_y, mean_speed, tag_dead, n_frames)
+    dead_mask = combined_dead_mask(ball_x, ball_y, mean_speed, tag_dead, n_frames, pitch)
     # Restart seeds override the dead-ball mask (play has restarted)
     dead_mask[restart_team != NOBODY] = False
     print("  spd_dead={:.1f}%  bnd_dead={:.2f}%  tag_dead={:.1f}%  combined={:.1f}%".format(
         100.0 * speed_dead_mask(mean_speed, n_frames).sum() / n_frames,
-        100.0 * boundary_dead_mask(ball_x, ball_y).sum()   / n_frames,
+        100.0 * boundary_dead_mask(ball_x, ball_y, pitch).sum()   / n_frames,
         100.0 * tag_dead.sum()                              / n_frames,
         100.0 * dead_mask.sum()                             / n_frames))
 
     # -- Step 5: state machine --
     print("\nRunning possession state machine …")
     labels = possession_state_machine(
-        nearest, near_dist, dead_mask, restart_team, n_frames, team_names)
+        nearest, near_dist, dead_mask, restart_team, n_frames, team_names, half_blks)
 
     # -- Step 6: post-processing --
     print("Enforcing minimum spell length ({} frames = {:.1f} s) …".format(
-        MIN_SPELL_FRAMES, MIN_SPELL_FRAMES / FPS))
-    labels = enforce_min_spell(labels, n_frames)
+        MIN_SPELL_FRAMES, MIN_SPELL_FRAMES / fps))
+    labels = enforce_min_spell(labels, n_frames, half_blks, MIN_SPELL_FRAMES)
 
     # -- Stats --
     counts = {lbl: int(np.sum(labels == lbl)) for lbl in ("H", "A", "D", "X")}
