@@ -1,5 +1,13 @@
 # More than a Hack 2027 — Phase 1: Ball Possession
 
+**Team DEVUPWARD Submission**  
+* **Technical Document:** [DEVUPWARD.md](DEVUPWARD.md)
+* **Regenerate Submission:** `python solution/pipeline.py --name DEVUPWARD`
+* **Validate Submission:** `python evaluation/validate_submission.py evaluation/results/DEVUPWARD.csv`
+* **Evaluate Against GT:** `python evaluation/run_evaluation.py`
+
+---
+
 **Organised by [Metrica Sports](https://metrica-sports.com), [FC Barcelona](https://www.fcbarcelona.com)
 and the [Mobile World Capital Barcelona](https://www.mwcbarcelona.com)**, at the Talent Arena in Barcelona.
 

@@ -73,7 +73,7 @@ MIN_SPELL_FRAMES     = 50     # frames — spells shorter than this are merged (
 
 # Output
 RESULTS_DIR     = os.path.join(ROOT, "evaluation", "results")
-SUBMISSION_NAME = "solution_v4"
+SUBMISSION_NAME = "DEVUPWARD"
 
 # Internal team codes — ordinal, assigned at load time from the ATD metadata.
 # 0 = home (first team in the XML), 1 = away, -1 = unknown / no ball.
